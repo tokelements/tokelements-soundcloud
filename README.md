@@ -5,7 +5,7 @@
 [![Install the script](https://img.shields.io/badge/Install-the%20script-FF5500?style=for-the-badge)](https://raw.githubusercontent.com/tokelements/tokelements-soundcloud/main/tokelements-soundcloud.user.js)
 [![TokElements](https://img.shields.io/badge/TokElements-tokelements.com-FF3158?style=for-the-badge)](https://tokelements.com)
 
-[![Version](https://img.shields.io/badge/version-0.2.1-22232D?style=flat-square)](tokelements-soundcloud.user.js)
+[![Version](https://img.shields.io/badge/version-0.2.2-22232D?style=flat-square)](tokelements-soundcloud.user.js)
 [![License](https://img.shields.io/badge/license-MIT-22232D?style=flat-square)](LICENSE)
 [![Works with](https://img.shields.io/badge/works%20with-OBS%20·%20Streamlabs%20·%20TikTok%20LIVE%20Studio-22232D?style=flat-square)](https://tokelements.com)
 
