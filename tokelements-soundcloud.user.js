@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TokElements for SoundCloud
 // @namespace    tokelements.soundcloud
-// @version      0.2.1
+// @version      0.2.2
 // @description  Drive your logged-in SoundCloud web player for TokElements (now-playing overlay + viewer song requests into Next up). No SoundCloud app or client id needed. One-click pairing when TokElements runs in the same browser.
 // @author       TokElements
 // @homepageURL  https://github.com/tokelements/tokelements-soundcloud
@@ -61,7 +61,7 @@
     var post = function (msg) {
       try { var m = {}; m[NS + '_from'] = 'agent'; for (var k in msg) m[k] = msg[k]; window.postMessage(m, location.origin); } catch (e) {}
     };
-    var announce = function () { var m = {}; m[NS] = 'agent-present'; m.version = '0.2.1'; post(m); };
+    var announce = function () { var m = {}; m[NS] = 'agent-present'; m.version = '0.2.2'; post(m); };
     announce();
     var n = 0, iv = setInterval(function () { announce(); if (++n > 12) clearInterval(iv); }, 1200);
     window.addEventListener('message', function (e) {
@@ -330,7 +330,24 @@
     // Its own clock, rather than answering a question the other half asked a moment ago: reading the
     // reply on the next tick meant the very first push carried "nothing playing" and the overlay
     // blinked to its empty state before the real track arrived.
-    setInterval(function () { try { send({ evt: 'snapshot', data: snapshot() }); } catch (e) {} }, 1000);
+    var lastSnapAt = 0;
+    function snap() { var now = Date.now(); if (now - lastSnapAt < 900) return; lastSnapAt = now; try { send({ evt: 'snapshot', data: snapshot() }); } catch (e) {} }
+    setInterval(snap, 1000);
+    /*
+     * A hidden tab gets its timers throttled — after a few minutes in the background Chrome runs
+     * them once a minute — and a streamer's SoundCloud tab is hidden for the whole stream. The
+     * audio element's own events are not throttled while it plays, so the snapshots ride on them
+     * and keep arriving every second whatever the timers do.
+     */
+    var hooked = null;
+    function hookAudio() {
+      var a = document.querySelector('audio');
+      if (!a || a === hooked) return;
+      hooked = a;
+      ['timeupdate', 'play', 'pause', 'ended', 'loadedmetadata'].forEach(function (ev) { a.addEventListener(ev, snap); });
+    }
+    hookAudio();
+    setInterval(hookAudio, 5000);
   }
 
   // Inject the page half. A userscript sandbox cannot reach the player's own modules, and this is
@@ -359,7 +376,7 @@
   function stable(np) {
     if (np && np.track) { emptyReads = 0; lastGood = np; return np; }
     emptyReads++;
-    if (lastGood && emptyReads <= 4) return lastGood;
+    if (lastGood && emptyReads <= 8) return lastGood;
     lastGood = null;
     return np;
   }
@@ -369,7 +386,7 @@
   function stableQueue(q) {
     if (q && q.length) { emptyQueues = 0; lastQueue = q; return q; }
     emptyQueues++;
-    if (lastQueue.length && emptyQueues <= 4) return lastQueue;
+    if (lastQueue.length && emptyQueues <= 8) return lastQueue;
     lastQueue = [];
     return q || [];
   }
@@ -387,6 +404,8 @@
       S.player = !!d.data.viaPlayer;
       if (d.data.loggedOut) { if (!loggedOutSince) loggedOutSince = Date.now(); } else loggedOutSince = 0;
       S.loggedOut = !!loggedOutSince && Date.now() - loggedOutSince > 5000;
+      // the snapshots come on the audio clock in a hidden tab; the push must not wait for a timer
+      pushLoop();
       return;
     }
     if (d.evt === 'ack' && d.id && acks[d.id]) { acks[d.id](d.result || { ok: false, error: 'no_result' }); delete acks[d.id]; }
@@ -414,8 +433,8 @@
     });
   }
 
-  // Push on change, plus a heartbeat every ~15s so TokElements keeps the link marked connected
-  // through pauses and between songs.
+  // Push on change, plus a heartbeat every ~10s so TokElements keeps the link marked connected
+  // through pauses and between songs. Called by the timer and by every snapshot that arrives.
   var lastKey = '', lastSentAt = 0;
   function pushLoop() {
     ensureInjected();
@@ -425,7 +444,9 @@
     var np = S.np;
     var key = JSON.stringify([np && np.track, np && np.artist, np && np.playing, Math.round(((np && np.positionMs) || 0) / 3000), S.loggedOut, S.queue.map(function (q) { return q.uri; })]);
     var now = Date.now();
-    // The server keeps a pushed track for 45 seconds; ten survives a couple of failed requests.
+    // The server keeps a pushed track for two minutes; ten seconds survives a few failed requests
+    // and a throttled tab. Never more often than every two seconds, whatever fires this.
+    if (now - lastSentAt < 2000 && key === lastKey) return;
     if (key !== lastKey || now - lastSentAt > 10000) {
       lastKey = key; lastSentAt = now;
       te('POST', '/api/soundcloud/agent/state', { nowPlaying: np, queue: S.queue, premium: null, loggedOut: S.loggedOut, connected: true })
