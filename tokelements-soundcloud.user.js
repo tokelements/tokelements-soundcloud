@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TokElements for SoundCloud
 // @namespace    tokelements.soundcloud
-// @version      0.2.2
+// @version      0.2.3
 // @description  Drive your logged-in SoundCloud web player for TokElements (now-playing overlay + viewer song requests into Next up). No SoundCloud app or client id needed. One-click pairing when TokElements runs in the same browser.
 // @author       TokElements
 // @homepageURL  https://github.com/tokelements/tokelements-soundcloud
@@ -61,7 +61,7 @@
     var post = function (msg) {
       try { var m = {}; m[NS + '_from'] = 'agent'; for (var k in msg) m[k] = msg[k]; window.postMessage(m, location.origin); } catch (e) {}
     };
-    var announce = function () { var m = {}; m[NS] = 'agent-present'; m.version = '0.2.2'; post(m); };
+    var announce = function () { var m = {}; m[NS] = 'agent-present'; m.version = '0.2.3'; post(m); };
     announce();
     var n = 0, iv = setInterval(function () { announce(); if (++n > 12) clearInterval(iv); }, 1200);
     window.addEventListener('message', function (e) {
@@ -339,15 +339,21 @@
      * audio element's own events are not throttled while it plays, so the snapshots ride on them
      * and keep arriving every second whatever the timers do.
      */
-    var hooked = null;
-    function hookAudio() {
-      var a = document.querySelector('audio');
-      if (!a || a === hooked) return;
-      hooked = a;
+    var hooked = [];
+    function hookAudio(a) {
+      if (!a || hooked.indexOf(a) >= 0) return;
+      hooked.push(a);
       ['timeupdate', 'play', 'pause', 'ended', 'loadedmetadata'].forEach(function (ev) { a.addEventListener(ev, snap); });
     }
-    hookAudio();
-    setInterval(hookAudio, 5000);
+    // SoundCloud's audio element is never attached to the document — it plays a blob: source from a
+    // detached <audio> — so there is nothing to query for. Every playback goes through play(), and
+    // this runs before the player's own code, so the prototype is where the element is caught.
+    try {
+      var origPlay = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function () { hookAudio(this); return origPlay.apply(this, arguments); };
+    } catch (e) {}
+    var stray = document.querySelector('audio, video');
+    if (stray) hookAudio(stray);
   }
 
   // Inject the page half. A userscript sandbox cannot reach the player's own modules, and this is
