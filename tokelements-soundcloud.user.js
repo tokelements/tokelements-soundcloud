@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TokElements for SoundCloud
 // @namespace    tokelements.soundcloud
-// @version      0.2.3
+// @version      0.3.0
 // @description  Drive your logged-in SoundCloud web player for TokElements (now-playing overlay + viewer song requests into Next up). No SoundCloud app or client id needed. One-click pairing when TokElements runs in the same browser.
 // @author       TokElements
 // @homepageURL  https://github.com/tokelements/tokelements-soundcloud
@@ -61,7 +61,7 @@
     var post = function (msg) {
       try { var m = {}; m[NS + '_from'] = 'agent'; for (var k in msg) m[k] = msg[k]; window.postMessage(m, location.origin); } catch (e) {}
     };
-    var announce = function () { var m = {}; m[NS] = 'agent-present'; m.version = '0.2.3'; post(m); };
+    var announce = function () { var m = {}; m[NS] = 'agent-present'; m.version = '0.3.0'; post(m); };
     announce();
     var n = 0, iv = setInterval(function () { announce(); if (++n > 12) clearInterval(iv); }, 1200);
     window.addEventListener('message', function (e) {
@@ -86,6 +86,7 @@
     teUrl: (GM_getValue('teUrl', '') || '').replace(/\/$/, ''),
     pairCode: GM_getValue('pairCode', ''),
     np: null, queue: [], online: null, player: null, lastPushOk: 0, haveSnapshot: false, loggedOut: false, lastResult: null,
+    leader: true, others: 0,
   };
   if (typeof GM_addValueChangeListener === 'function') {
     GM_addValueChangeListener('pairCode', function (_k, _o, v) { S.pairCode = v || ''; hud(); });
@@ -426,6 +427,38 @@
     });
   }
 
+  // ---- one tab speaks for the player ----
+  /*
+   * Two or three SoundCloud tabs each ran this script, each pushed what it saw and each took song
+   * requests from the queue: a tab with nothing playing reported "nothing playing" over the song in
+   * the other, and a requested track landed in whichever tab polled first — often one where it never
+   * played. The tabs now keep a roster in GM storage (shared across tabs) and agree on one leader:
+   * the tab that is playing; otherwise one with a track loaded; otherwise the one used most recently.
+   * The leader keeps the role until another tab has a better claim, so a pause does not flip it.
+   * Only the leader pushes state and takes commands; the others just watch their own player.
+   */
+  var TAB = sessionStorage.getItem(NS + '_tab') || Math.random().toString(36).slice(2, 10);
+  sessionStorage.setItem(NS + '_tab', TAB);
+  var focusedAt = document.hasFocus() ? Date.now() : 0;
+  window.addEventListener('focus', function () { focusedAt = Date.now(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) focusedAt = Date.now(); });
+  function electLeader() {
+    var now = Date.now(), r;
+    try { r = JSON.parse(GM_getValue('tabs', '{}') || '{}'); } catch (e) { r = {}; }
+    r[TAB] = { at: now, playing: !!(S.np && S.np.track && S.np.playing), track: !!(S.np && S.np.track), focus: focusedAt };
+    var alive = {}, ids = [];
+    for (var id in r) if (now - (r[id].at || 0) < 8000) { alive[id] = r[id]; ids.push(id); }
+    GM_setValue('tabs', JSON.stringify(alive));
+    ids.sort(function (a, b) { var A = alive[a], B = alive[b]; return (B.playing - A.playing) || (B.track - A.track) || (B.focus - A.focus) || (a < b ? -1 : 1); });
+    var best = ids[0], lead = GM_getValue('leader', ''), cur = alive[lead];
+    if (cur && best !== lead && (cur.playing || !alive[best].playing) && (cur.track || !alive[best].track)) best = lead;
+    if (best === TAB && lead !== TAB) GM_setValue('leader', TAB);
+    var was = S.leader;
+    S.leader = best === TAB;
+    S.others = ids.length - 1;
+    if (S.leader && !was) lastKey = '';        // taking over: push at once, whatever the last push was
+  }
+
   // ---- TokElements comms over GM_xmlhttpRequest (CSP-safe) ----
   function te(method, path, body) {
     return new Promise(function (resolve) {
@@ -447,6 +480,8 @@
     // Nothing is sent until the page half has answered once: an empty first push would tell the
     // overlay that nothing is playing before we have even looked.
     if (!S.haveSnapshot) { askPage('snapshot'); hud(); return; }
+    electLeader();
+    if (!S.leader) { hud(); return; }
     var np = S.np;
     var key = JSON.stringify([np && np.track, np && np.artist, np && np.playing, Math.round(((np && np.positionMs) || 0) / 3000), S.loggedOut, S.queue.map(function (q) { return q.uri; })]);
     var now = Date.now();
@@ -461,6 +496,7 @@
     hud();
   }
   function pollLoop() {
+    if (!S.leader) return;
     te('GET', '/api/soundcloud/agent/commands').then(function (r) {
       if (!r || !r.commands) return;
       r.commands.forEach(function (c) {
@@ -482,31 +518,47 @@
   GM_registerMenuCommand('TokElements: reset / unpair', function () { S.pairCode = ''; GM_deleteValue('pairCode'); hud(); });
 
   // ---- status panel, so a streamer can see what is happening without opening a console ----
-  var hudEl = null;
+  // Sits above SoundCloud's player bar. A click folds it to a dot; the choice is kept across tabs.
+  var hudEl = null, hudMin = !!GM_getValue('hudMin', false);
+  function esc(x) { return String(x == null ? '' : x).replace(/[<>&]/g, function (c) { return c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'; }); }
   function hud() {
     if (!document.body) return;
     if (!hudEl) {
       hudEl = document.createElement('div');
-      hudEl.style.cssText = 'position:fixed;z-index:99999;right:12px;bottom:96px;max-width:280px;min-width:212px;background:#121212f0;color:#fff;font:12px/1.45 system-ui,sans-serif;padding:10px 12px;border-radius:12px;box-shadow:0 8px 28px #0009;border:1px solid #ff550055';
+      hudEl.setAttribute('title', 'TokElements · click to fold');
+      hudEl.addEventListener('click', function () { hudMin = !hudMin; GM_setValue('hudMin', hudMin); hud(); });
       document.body.appendChild(hudEl);
     }
-    var dot = '#f0c674', label, sub = '';
-    if (!S.teUrl || !S.pairCode) { dot = '#888'; label = 'Not paired'; sub = 'Open TokElements → “Connect in this browser”, or menu → set code'; }
-    else if (S.online === false) { dot = '#e05555'; label = 'TokElements unreachable'; sub = 'Check the URL in the Tampermonkey menu'; }
-    else if (S.loggedOut) { dot = '#e05555'; label = 'Not signed in to SoundCloud'; sub = 'Log in on this tab — nothing can play or be queued until you do'; }
-    else if (!S.np || !S.np.track) { dot = '#f0c674'; label = 'Linked · waiting for a song'; sub = 'Play a track in this SoundCloud tab'; }
-    else { dot = '#FF5500'; label = '♪ ' + String(S.np.track).slice(0, 34); sub = (S.np.playing ? 'Playing' : 'Paused') + (S.player ? '' : ' · player not reachable, requests off') + ' · sending to TokElements'; }
+    var dot = '#f0c674', tone = '#f0c674', title = '', sub = '';
+    if (!S.teUrl || !S.pairCode) { dot = tone = '#8a8b96'; title = 'Not paired'; sub = 'Open TokElements → Connect in this browser'; }
+    else if (S.online === false) { dot = tone = '#ff6a6a'; title = 'TokElements unreachable'; sub = 'Check the URL in the Tampermonkey menu'; }
+    else if (!S.leader) { dot = tone = '#8a8b96'; title = 'Another SoundCloud tab is sending'; sub = 'This tab takes over when it plays'; }
+    else if (S.loggedOut) { dot = tone = '#ff6a6a'; title = 'Not signed in to SoundCloud'; sub = 'Log in on this tab to play and queue'; }
+    else if (!S.np || !S.np.track) { title = 'Waiting for a song'; sub = 'Play a track in this tab'; }
+    else {
+      dot = tone = S.np.playing ? '#FF5500' : '#c9c9d0';
+      title = String(S.np.track);
+      sub = (S.np.playing ? 'Playing' : 'Paused') + ' · sending to TokElements' + (S.player ? '' : ' · requests off') + (S.others ? ' · ' + S.others + ' other tab' + (S.others > 1 ? 's' : '') + ' quiet' : '');
+    }
     var line = '';
     if (S.lastResult && Date.now() - S.lastResult.at < 30000) {
       var r = S.lastResult;
-      var what = r.type === 'control' ? (r.ok ? 'Skipped' : 'Skip failed') : r.ok ? ('Queued: ' + String((r.added && r.added.name) || 'track').slice(0, 28)) : ('Request failed: ' + (r.error || 'unknown'));
-      line = '<div style="margin-top:6px;padding-top:6px;border-top:1px solid #ffffff1a;font-size:11px;color:' + (r.ok ? '#8fdba4' : '#ff9aa2') + '">' + what + '</div>';
+      var what = r.type === 'control' ? (r.ok ? 'Skipped' : 'Skip failed') : r.ok ? ('Queued · ' + String((r.added && r.added.name) || 'track')) : ('Request failed · ' + (r.error || 'unknown'));
+      line = '<div style="margin-top:7px;padding-top:7px;border-top:1px solid #ffffff14;font-size:11px;font-weight:600;color:' + (r.ok ? '#7ed6a0' : '#ff8c96') + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(what) + '</div>';
     }
+    var base = 'position:fixed;z-index:99999;right:14px;bottom:100px;color:#fff;font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;cursor:pointer;user-select:none;transition:opacity .2s;';
+    if (hudMin) {
+      hudEl.style.cssText = base + 'display:flex;align-items:center;gap:7px;height:28px;padding:0 10px 0 9px;border-radius:14px;background:#141418f2;border:1px solid #ffffff1f;box-shadow:0 6px 20px #0008;font-size:11px;font-weight:700;letter-spacing:.04em;';
+      hudEl.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:' + dot + ';box-shadow:0 0 6px ' + dot + '"></span><span style="color:#fff;opacity:.85">TE</span>';
+      return;
+    }
+    hudEl.style.cssText = base + 'width:272px;padding:10px 12px 11px 14px;border-radius:12px;background:#141418f2;backdrop-filter:blur(8px);border:1px solid #ffffff1a;box-shadow:0 10px 30px #000a,inset 3px 0 0 ' + tone + ';';
     hudEl.innerHTML =
-      '<div style="display:flex;align-items:center;gap:7px;font-weight:700">' +
-      '<span style="width:8px;height:8px;border-radius:50%;background:' + dot + ';box-shadow:0 0 8px ' + dot + '"></span>' +
-      '<span style="color:#FF5500">TokElements</span><span style="opacity:.85">· ' + label + '</span></div>' +
-      (sub ? '<div style="margin-top:4px;opacity:.6;font-size:11px">' + sub + '</div>' : '') + line;
+      '<div style="display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#ffffff99">' +
+      '<span style="width:7px;height:7px;border-radius:50%;background:' + dot + ';box-shadow:0 0 7px ' + dot + '"></span>TokElements' +
+      '<span style="margin-left:auto;font-weight:600;letter-spacing:0;text-transform:none;color:#ffffff55">SoundCloud</span></div>' +
+      '<div style="margin-top:5px;font-size:13px;font-weight:700;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(title) + '</div>' +
+      (sub ? '<div style="margin-top:2px;font-size:11px;color:#ffffff80;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(sub) + '</div>' : '') + line;
   }
   hud();
 })();
